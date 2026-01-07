@@ -1,0 +1,64 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    command: >
+      sh -c "
+      echo 'Waiting for Zookeeper...';
+      while ! nc -z zookeeper 2181; do sleep 1; done;
+      echo 'Zookeeper is ready!';
+      /etc/confluent/docker/run
+      "
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+
+  flink-pipeline:
+    build: .
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      FLINK_RUNTIME: docker
+    command: >
+      sh -c '
+        while true; do
+          echo "Starting streaming_pipeline.py...";
+          python3 streaming_platform/streaming_pipeline.py;
+          echo "Streaming script exited with code $?";
+          echo "Sleeping 10s before retry...";
+          sleep 10;
+        done
+      '
+
+  redis-sink:
+    build: .
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    command: >
+      sh -c '   
+        while ! nc -z kafka 9092; do sleep 1; done;
+        while ! nc -z redis 6379; do sleep 1; done;
+        python3 kafka_to_redis_sink.py
+      '
+
