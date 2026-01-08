@@ -22,11 +22,21 @@ services:
       echo 'Zookeeper is ready!';
       /etc/confluent/docker/run
       "
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10  
 
   redis:
     image: redis:latest
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   flink-pipeline:
     build: .
@@ -62,3 +72,15 @@ services:
         python3 kafka_to_redis_sink.py
       '
 
+  test-runner:
+    build: .
+    depends_on:
+      - flink-pipeline
+      - redis-sink
+      - kafka
+      - redis
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    command: pytest tests/test_e2e.py

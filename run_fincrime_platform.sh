@@ -109,6 +109,22 @@ for TOPIC in "${TOPICS[@]}"; do
     fi
 done
 
+# Check if Redis is already running on REDIS_PORT
+if nc -z localhost $REDIS_PORT; then
+    echo "Redis already running on port $REDIS_PORT, flushing DB..."
+    redis-cli -p $REDIS_PORT flushall
+else
+    echo "Starting Redis on port $REDIS_PORT..."
+    # Start Redis in the background
+    redis-server --port $REDIS_PORT > /tmp/redis.log 2>&1 &
+    # Wait until Redis responds to ping
+    until redis-cli -p $REDIS_PORT ping 2>/dev/null | grep -q PONG; do
+        echo "Waiting for Redis to start..."
+        sleep 1
+    done
+    echo "Redis is up!"
+fi
+
 
 # --- 3. START PIPELINES ---
 echo "[3/4] Starting Flink Pipeline..."
