@@ -1,32 +1,46 @@
 services:
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
+    image: confluentinc/cp-zookeeper:latest
+    container_name: flink-zookeeper-1
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok"
+    networks:
+      - pipeline-network
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/2181 && echo -e 'ruok' >&3 && grep imok <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s # Wait 20s before the first check
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
-    depends_on:
-      - zookeeper
+    container_name: kafka
+    ports:
+      - "9092:9092" 
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    command: >
-      sh -c "
-      echo 'Waiting for Zookeeper...';
-      while ! nc -z zookeeper 2181; do sleep 1; done;
-      echo 'Zookeeper is ready!';
-      /etc/confluent/docker/run
-      "
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+    networks:
+      - pipeline-network
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 10s
-      timeout: 5s
-      retries: 10  
+      timeout: 10s
+      retries: 5
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
   redis:
     image: redis:latest
@@ -37,6 +51,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - pipeline-network
 
   flink-pipeline:
     build: .
@@ -55,6 +71,8 @@ services:
           sleep 10;
         done
       '
+    networks:
+      - pipeline-network
 
   redis-sink:
     build: .
@@ -71,16 +89,63 @@ services:
         while ! nc -z redis 6379; do sleep 1; done;
         python3 kafka_to_redis_sink.py
       '
+    networks:
+      - pipeline-network
 
   test-runner:
     build: .
-    depends_on:
-      - flink-pipeline
-      - redis-sink
-      - kafka
-      - redis
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_HOST: redis
       REDIS_PORT: 6379
     command: pytest tests/test_e2e.py
+    networks:
+      - pipeline-network
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  memgraph:
+    image: memgraph/memgraph-mage:latest
+    container_name: memgraph
+    ports:
+      - "7687:7687"  # Database connection
+    volumes:
+      # This line is key: it mounts your local folder to the DB's module folder
+      - ./modules:/usr/lib/memgraph/query_modules
+      # Persists your graph data so it doesn't vanish when you stop the container
+      - mg_lib:/var/lib/memgraph
+    networks:
+      - pipeline-network
+
+  memgraph-lab:
+    image: memgraph/lab:latest
+    container_name: memgraph-lab
+    ports:
+      - "3000:3000"
+    depends_on:
+      - memgraph
+    networks:
+      - pipeline-network
+
+  bridge:
+    image: python:3.12-slim
+    container_name: memgraph-bridge
+    depends_on:
+      - kafka
+      - memgraph
+    volumes:
+      - ./bridge.py:/app/bridge.py
+    working_dir: /app
+    command: /bin/bash -c "pip install confluent-kafka neo4j && python3 bridge.py"
+    networks:
+      - pipeline-network
+
+networks:
+  pipeline-network:
+    driver: bridge
+
+volumes:
+  mg_lib:
